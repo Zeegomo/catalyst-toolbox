@@ -171,21 +171,18 @@ impl VoteRoundGenerator {
 
                 let address =
                     account_from_slice(&transaction.as_slice()).expect("utxo votes not supported");
-                let update_voteplan = self
-                    .voteplan_managers
-                    .get(&vote_plan_id)
-                    .unwrap()
-                    .vote(
-                        self.voteplan_managers
-                            .get(&vote_plan_id)
-                            .expect("vote plan not found")
-                            .plan()
-                            .vote_start(),
-                        address,
-                        vote_cast,
-                    )
-                    .unwrap();
-                self.voteplan_managers.insert(vote_plan_id, update_voteplan);
+                let update_voteplan = self.voteplan_managers.get(&vote_plan_id).unwrap().vote(
+                    self.voteplan_managers
+                        .get(&vote_plan_id)
+                        .expect("vote plan not found")
+                        .plan()
+                        .vote_start(),
+                    address,
+                    vote_cast,
+                );
+                if let Ok(update_voteplan) = update_voteplan {
+                    self.voteplan_managers.insert(vote_plan_id, update_voteplan);
+                }
             } else {
                 panic!("a non vote fragment was generated");
             };
@@ -264,6 +261,7 @@ impl GenerationStrategy for TestStrategy {
             Self::Random(seed) => {
                 let mut rng = ChaChaRng::from_seed(*seed);
                 let mut fragments = Vec::new();
+                wallets.shuffle(&mut rng);
 
                 for _ in 0..n_fragments {
                     let wallet = wallets.choose_mut(&mut rng).expect("no wallet");
