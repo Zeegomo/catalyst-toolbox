@@ -345,6 +345,7 @@ dependencies = [
  "graphql_client",
  "hex",
  "image",
+ "imhamt",
  "jcli",
  "jormungandr-integration-tests",
  "jormungandr-lib",
