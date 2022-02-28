@@ -68,6 +68,7 @@ assert_fs = "1.0.0"
 chain-vote = { git = "https://github.com/input-output-hk/chain-libs.git", branch = "master" }
 quickcheck = "0.9"
 quickcheck_macros = "0.9"
+serde_test = "1"
 
 [build-dependencies]
 versionisator = "1.0.3"
