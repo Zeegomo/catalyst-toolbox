@@ -8,7 +8,7 @@ use rust_decimal::{prelude::ToPrimitive, Decimal};
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, HashMap};
 
-use serde::Serialize;
+use serde::{de::Error, Deserialize, Deserializer, Serialize};
 
 #[derive(Serialize)]
 pub struct VeteranAdvisorIncentive {
@@ -40,34 +40,11 @@ fn calc_final_ranking_per_review(rankings: &[impl Borrow<VeteranRankingRow>]) ->
     }
 }
 
-fn rewards_disagreement_discount(agreement_rate: Decimal) -> Decimal {
-    // Cannot use decimal range pattern in matches, and don't want to complicate
-    // stuff by using exact integer arithmetic since it's not really needed at this point
-    // Thresholds at 0.9 - 0.75 - 0.6
-    if agreement_rate >= Decimal::new(9, 1) {
-        Decimal::ONE
-    } else if agreement_rate >= Decimal::new(75, 2) {
-        Decimal::from(5) / Decimal::from(6)
-    } else if agreement_rate >= Decimal::new(6, 1) {
-        Decimal::from(2) / Decimal::from(3)
-    } else {
-        Decimal::ZERO
-    }
-}
-
-fn reputation_disagreement_discount(agreement_rate: Decimal) -> Decimal {
-    if agreement_rate >= Decimal::new(6, 1) {
-        Decimal::ONE
-    } else {
-        Decimal::ZERO
-    }
-}
-
 fn calc_final_eligible_rankings(
     all_rankings: &HashMap<VeteranAdvisorId, usize>,
     eligible_rankings: HashMap<VeteranAdvisorId, usize>,
     thresholds: EligibilityThresholds,
-    discount_rate: impl Fn(Decimal) -> Decimal,
+    discount_rate: &DiscountRanges,
 ) -> BTreeMap<VeteranAdvisorId, Rewards> {
     eligible_rankings
         .into_iter()
@@ -76,9 +53,8 @@ fn calc_final_eligible_rankings(
                 return None;
             }
 
-            let to_discount = discount_rate(
-                Decimal::from(n_rankings) / Decimal::from(*all_rankings.get(&vca).unwrap()),
-            );
+            let to_discount = discount_rate
+                .get(Decimal::from(n_rankings) / Decimal::from(*all_rankings.get(&vca).unwrap()));
 
             let n_rankings = Rewards::from(n_rankings.min(*thresholds.end())) * to_discount;
 
@@ -92,6 +68,8 @@ pub fn calculate_veteran_advisors_incentives(
     total_rewards: Rewards,
     rewards_thresholds: EligibilityThresholds,
     reputation_thresholds: EligibilityThresholds,
+    rewards_discounts: &DiscountRanges,
+    reputation_discounts: &DiscountRanges,
 ) -> HashMap<VeteranAdvisorId, VeteranAdvisorIncentive> {
     let final_rankings_per_review = veteran_rankings
         .iter()
@@ -119,14 +97,14 @@ pub fn calculate_veteran_advisors_incentives(
         &rankings_per_vca,
         eligible_rankings_per_vca.clone(),
         reputation_thresholds,
-        reputation_disagreement_discount,
+        reputation_discounts,
     );
 
     let rewards_eligible_rankings = calc_final_eligible_rankings(
         &rankings_per_vca,
         eligible_rankings_per_vca,
         rewards_thresholds,
-        rewards_disagreement_discount,
+        rewards_discounts,
     );
 
     let tot_rewards_eligible_rankings = rewards_eligible_rankings.values().sum::<Rewards>();
@@ -147,6 +125,54 @@ pub fn calculate_veteran_advisors_incentives(
         .collect()
 }
 
+#[derive(Debug)]
+pub struct DiscountRanges(Vec<(Decimal, Decimal)>);
+
+impl<'de> Deserialize<'de> for DiscountRanges {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use std::ops::Range;
+
+        let mut v = <Vec<(Range<Decimal>, Decimal)>>::deserialize(deserializer)?;
+        v.sort_by_key(|(range, _)| range.start); // sort ranges per increasing start
+
+        let v = match v.as_slice() {
+            &[] => Err(D::Error::custom("empty range".to_string())),
+            ranges @ &[(Range { start, .. }, _), .., (Range { end, .. }, _)]
+            | ranges @ &[(Range { start, end }, _)]
+                if start == Decimal::ZERO && end == Decimal::ONE =>
+            {
+                for window in ranges.windows(2) {
+                    if window[1].0.start != window[0].0.end {
+                        return Err(D::Error::custom(format!(
+                            "ranges {:?} and {:?} overlap or have gap in between",
+                            window[0].0, window[1].0
+                        )));
+                    }
+                }
+                Ok(ranges
+                    .iter()
+                    .map(|(range, discount)| (range.start, *discount))
+                    .chain(std::iter::once((Decimal::ONE, v.last().unwrap().1))))
+            }
+            _ => Err(D::Error::custom(
+                "the interval [0, 1] is not covered".to_string(),
+            )),
+        }?;
+
+        Ok(Self(v.collect()))
+    }
+}
+
+impl DiscountRanges {
+    pub fn get(&self, agreement: Decimal) -> Decimal {
+        assert!(agreement <= Decimal::ONE);
+        self.0[self.0.partition_point(|&(x, _)| x <= agreement) - 1].1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,6 +182,24 @@ mod tests {
     const VCA_1: &str = "vca1";
     const VCA_2: &str = "vca2";
     const VCA_3: &str = "vca3";
+
+    fn default_rewards_discount() -> DiscountRanges {
+        DiscountRanges(vec![
+            (Decimal::ZERO, Decimal::ZERO),
+            (Decimal::new(6, 1), Decimal::from(2u8) / Decimal::from(3u8)),
+            (Decimal::new(75, 2), Decimal::from(5u8) / Decimal::from(6u8)),
+            (Decimal::new(9, 1), Decimal::ONE),
+            (Decimal::ONE, Decimal::ONE),
+        ])
+    }
+
+    fn default_reputation_discount() -> DiscountRanges {
+        DiscountRanges(vec![
+            (Decimal::ZERO, Decimal::ZERO),
+            (Decimal::new(6, 1), Decimal::ONE),
+            (Decimal::ONE, Decimal::ONE),
+        ])
+    }
 
     struct RandomIterator;
     impl Iterator for RandomIterator {
@@ -218,7 +262,14 @@ mod tests {
             .chain(gen_dummy_rankings("2".into(), 1, 0, 0, vca2_only))
             .collect::<Vec<_>>();
         // only vca with more than 2 reviews get reputation and rewards
-        let results = calculate_veteran_advisors_incentives(&rankings, total_rewards, 2..=2, 2..=2);
+        let results = calculate_veteran_advisors_incentives(
+            &rankings,
+            total_rewards,
+            2..=2,
+            2..=2,
+            &default_rewards_discount(),
+            &default_reputation_discount(),
+        );
         assert!(results.get(VCA_1).is_none());
         let res = results.get(VCA_2).unwrap();
         assert_eq!(res.reputation, 2);
@@ -234,13 +285,20 @@ mod tests {
             .into_iter()
             .chain(gen_dummy_rankings("2".into(), 1, 0, 0, vca2_only))
             .collect::<Vec<_>>();
-        let results = calculate_veteran_advisors_incentives(&rankings, total_rewards, 1..=1, 1..=1);
+        let results = calculate_veteran_advisors_incentives(
+            &rankings,
+            total_rewards,
+            1..=1,
+            1..=1,
+            &default_rewards_discount(),
+            &default_reputation_discount(),
+        );
         let res1 = results.get(VCA_1).unwrap();
         assert_eq!(res1.reputation, 1);
-        assert_eq!(res1.rewards, Rewards::ONE / Rewards::from(2));
+        assert_eq!(res1.rewards, Rewards::ONE / Rewards::from(2u8));
         let res2 = results.get(VCA_2).unwrap();
         assert_eq!(res2.reputation, 1);
-        assert_eq!(res2.rewards, Rewards::ONE / Rewards::from(2));
+        assert_eq!(res2.rewards, Rewards::ONE / Rewards::from(2u8));
     }
 
     fn are_close(a: Decimal, b: Decimal) -> bool {
@@ -255,41 +313,47 @@ mod tests {
             (Rewards::new(4, 1), Rewards::ZERO, Rewards::ZERO),
             (
                 Rewards::new(6, 1),
-                Rewards::from(2) / Rewards::from(3),
+                Rewards::from(2u8) / Rewards::from(3u8),
                 Rewards::ONE,
             ),
             (
                 Rewards::new(75, 2),
-                Rewards::from(5) / Rewards::from(6),
+                Rewards::from(5u8) / Rewards::from(6u8),
                 Rewards::ONE,
             ),
             (Rewards::new(9, 1), Rewards::ONE, Rewards::ONE),
         ];
         for (agreement, reward_discount, reputation_discount) in inputs {
-            let rankings = (0..100)
+            let rankings = (0..100u8)
                 .flat_map(|i| {
                     let vcas =
                         vec![VCA_1.to_owned(), VCA_2.to_owned(), VCA_3.to_owned()].into_iter();
-                    let (good, filtered_out) = if Rewards::from(i) < agreement * Rewards::from(100)
-                    {
-                        (3, 0)
-                    } else {
-                        (2, 1)
-                    };
+                    let (good, filtered_out) =
+                        if Rewards::from(i) < agreement * Rewards::from(100u8) {
+                            (3, 0)
+                        } else {
+                            (2, 1)
+                        };
                     gen_dummy_rankings(i.to_string(), 0, good, filtered_out, vcas).into_iter()
                 })
                 .collect::<Vec<_>>();
-            let results =
-                calculate_veteran_advisors_incentives(&rankings, total_rewards, 1..=200, 1..=200);
-            let expected_reward_portion = agreement * Rewards::from(100) * reward_discount;
+            let results = calculate_veteran_advisors_incentives(
+                &rankings,
+                total_rewards,
+                1..=200,
+                1..=200,
+                &default_rewards_discount(),
+                &default_reputation_discount(),
+            );
+            let expected_reward_portion = agreement * Rewards::from(100u8) * reward_discount;
             dbg!(expected_reward_portion);
             let expected_rewards = total_rewards
-                / (Rewards::from(100 * 2) + expected_reward_portion)
+                / (Rewards::from(100u8 * 2) + expected_reward_portion)
                 * expected_reward_portion;
             let res = results.get(VCA_3).unwrap();
             assert_eq!(
                 res.reputation,
-                (Rewards::from(100) * agreement * reputation_discount)
+                (Rewards::from(100u8) * agreement * reputation_discount)
                     .to_u64()
                     .unwrap()
             );

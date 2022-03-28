@@ -32,6 +32,14 @@ pub struct VeteransRewards {
     /// Cutoff for reputation: ranking more reviews than this limit will not result in more reputation awarded
     #[structopt(long)]
     max_rankings_reputation: usize,
+
+    /// Custom json-encoded map for discounting monatery rewards based on rankings agreement rate
+    #[structopt(long)]
+    rewards_agreement_discounts: PathBuf,
+
+    /// Custom json encoded map for discounting reputation rewards based on rankings agreement rate
+    #[structopt(long)]
+    reputation_agreement_discounts: PathBuf,
 }
 
 impl VeteransRewards {
@@ -43,6 +51,8 @@ impl VeteransRewards {
             min_rankings,
             max_rankings_reputation,
             max_rankings_rewards,
+            reputation_agreement_discounts,
+            rewards_agreement_discounts,
         } = self;
         let reviews: Vec<VeteranRankingRow> = csv::load_data_from_csv::<_, b','>(&from)?;
         let results = veterans::calculate_veteran_advisors_incentives(
@@ -50,6 +60,8 @@ impl VeteransRewards {
             total_rewards,
             min_rankings..=max_rankings_rewards,
             min_rankings..=max_rankings_reputation,
+            &serde_json::from_reader(std::fs::File::open(rewards_agreement_discounts)?)?,
+            &serde_json::from_reader(std::fs::File::open(reputation_agreement_discounts)?)?,
         );
 
         csv::dump_data_to_csv(&rewards_to_csv_data(results), &to).unwrap();
