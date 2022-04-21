@@ -144,7 +144,7 @@ jobs:
         continue-on-error: false
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          args: --all-features -- --deny warnings 
+          args: --all-features -- --deny warnings
 
   test_coverage:
     name: Test Coverage
